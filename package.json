@@ -1,0 +1,13 @@
+{
+  "name": "freebuff-pool",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Multi-account pool for Freebuff Desktop: pooled limits, automatic failover, loopback dashboard.",
+  "scripts": {
+    "test": "node --test tests/pool-core.test.mjs",
+    "patch": "node install.mjs",
+    "revert": "node install.mjs --revert",
+    "ctl": "node poolctl.mjs status"
+  }
+}

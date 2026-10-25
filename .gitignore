@@ -1,0 +1,30 @@
+# Runtime state. Contains auth tokens, device private keys and e-mail addresses.
+state.json*
+pool.json*
+clones.json
+*.log
+*.pool-orig
+
+# Electron profile directories (cookies, local storage, caches).
+electron/
+projects/
+local-projects/
+shared-test/
+account-skills/
+full-clone/
+t2/
+t2-open.png
+
+# Clone profiles: every clone dir carries its own state.json, log and profile.
+*/state.json
+*/clone.log
+*/projects/
+*/account-skills/
+*/electron/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
