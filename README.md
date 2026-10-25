@@ -38,7 +38,7 @@ Three pieces ship here:
 ## Install — Linux
 
 ```bash
-git clone https://github.com/<you>/freebuff-pool.git
+git clone https://github.com/Ayhaboba/freebuff-pool.git
 cd freebuff-pool
 ./install.sh                    # finds the app bundle, copies, patches
 ./install.sh --app /path/to/squashfs-root   # or point at it explicitly
@@ -66,7 +66,7 @@ profile, `FREEBUFF_POOL_SHARED=0 ./run-pool.sh`.
 ## Install — Windows
 
 ```powershell
-git clone https://github.com/<you>/freebuff-pool.git
+git clone https://github.com/Ayhaboba/freebuff-pool.git
 cd freebuff-pool
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 # or: .\install.ps1 -AppDir "$env:LOCALAPPDATA\Programs\freebuff"
