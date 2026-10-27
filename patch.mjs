@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-// Inject the pool runtime into a Freebuff orchestrator bundle.
+// Inject (or refresh) the pool runtime inside a Freebuff orchestrator bundle.
 // Usage: node patch.mjs <orchestrator.js> [--revert] [--check-only]
+//
+// Fresh bundle   → inject the runtime before `var server = Bun.serve({`.
+// Patched bundle → replace the injected block in place when the runtime on disk
+//                  changed (no revert needed), otherwise report the version.
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const RUNTIME = join(here, "pool-runtime.js");
-const MARKER = "/* __FREEBUFF_POOL_RUNTIME__ v1 */";
+const MARKER_RE = /\/\* __FREEBUFF_POOL_RUNTIME__ v(\d+) \*\//;
 const ANCHOR = "var server = Bun.serve({";
 
 const args = process.argv.slice(2);
@@ -24,7 +28,8 @@ if (!target || !existsSync(target)) {
 
 const backup = `${target}.pool-orig`;
 const source = readFileSync(target, "utf8");
-const patched = source.includes(MARKER);
+const marker = MARKER_RE.exec(source);
+const patched = marker !== null;
 
 if (revert) {
   if (!existsSync(backup)) {
@@ -37,7 +42,7 @@ if (revert) {
 }
 
 if (checkOnly) {
-  console.log(patched ? "patched" : "clean");
+  console.log(patched ? `patched (v${marker[1]})` : "clean");
   process.exit(patched ? 0 : 1);
 }
 
@@ -52,25 +57,56 @@ function syntaxCheck(text) {
   }
 }
 
+function readRuntime() {
+  const text = readFileSync(RUNTIME, "utf8");
+  const version = MARKER_RE.exec(text);
+  if (!version || !text.includes("__FREEBUFF_POOL_RUNTIME__")) {
+    console.error(`runtime snippet lost its marker: ${RUNTIME}`);
+    process.exit(1);
+  }
+  return { text, version: version[1] };
+}
+
+const runtime = readRuntime();
+
+// ── already patched: swap the injected block when the runtime changed ──────
 if (patched) {
-  console.log("already patched");
+  const start = marker.index;
+  const anchorAt = source.indexOf(ANCHOR, start);
+  if (anchorAt < 0) {
+    console.error(`the patched bundle no longer contains its anchor (${ANCHOR})`);
+    console.error("rebuild from a clean bundle with --revert, then patch again");
+    process.exit(1);
+  }
+  const injected = source.slice(start, anchorAt);
+  if (injected === `${runtime.text}\n`) {
+    console.log(`already patched (v${marker[1]})`);
+    process.exit(0);
+  }
+  const next = `${source.slice(0, start)}${runtime.text}\n${source.slice(anchorAt)}`;
+  try {
+    syntaxCheck(next);
+  } catch (error) {
+    console.error("updated bundle does not parse; nothing written");
+    console.error(String(error.stderr ?? error.message).slice(0, 2000));
+    process.exit(1);
+  }
+  writeFileSync(target, next);
+  console.log(
+    `updated runtime v${marker[1]} → v${runtime.version} (${next.length - source.length >= 0 ? "+" : ""}${next.length - source.length} bytes)`,
+  );
   process.exit(0);
 }
 
+// ── clean bundle: inject before the anchor ─────────────────────────────────
 const occurrences = source.split(ANCHOR).length - 1;
 if (occurrences !== 1) {
   console.error(`anchor is not unique (${occurrences} occurrences): ${ANCHOR}`);
   process.exit(1);
 }
 
-const runtime = readFileSync(RUNTIME, "utf8");
-if (!runtime.includes("__FREEBUFF_POOL_RUNTIME__")) {
-  console.error(`runtime snippet lost its marker: ${RUNTIME}`);
-  process.exit(1);
-}
-
 const insertAt = source.indexOf(ANCHOR);
-const next = `${source.slice(0, insertAt)}${runtime}\n${source.slice(insertAt)}`;
+const next = `${source.slice(0, insertAt)}${runtime.text}\n${source.slice(insertAt)}`;
 
 try {
   syntaxCheck(next);
@@ -85,4 +121,4 @@ if (!existsSync(backup)) {
   console.log(`backup ${backup}`);
 }
 writeFileSync(target, next);
-console.log(`patched ${target} (+${next.length - source.length} bytes)`);
+console.log(`patched ${target} (v${runtime.version}, +${next.length - source.length} bytes)`);

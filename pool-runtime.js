@@ -1,4 +1,4 @@
-/* __FREEBUFF_POOL_RUNTIME__ v1 */
+/* __FREEBUFF_POOL_RUNTIME__ v3 */
 // Injected into resources/orchestrator/orchestrator.js immediately before the
 // Bun.serve call. Everything below runs in the orchestrator's module scope, so
 // auth3 / sessions / login / registry2 / broadcastAuth are the live instances.
@@ -37,6 +37,28 @@ try {
     `runtime up: file=${__poolFile} accounts=${core.state.accounts.length} active=${
       core.state.activeId ?? "none"
     }`,
+  );
+
+  // Failover policy. Both defaults protect paid time:
+  //  · a concurrency refusal ("this hour is in use in another tab") is answered
+  //    by the tab's own "Use it here" takeover, not by spending the next account;
+  //  · a quota refusal never releases a live hour to buy time on another account.
+  // FREEBUFF_POOL_FAILOVER_ON_BUSY=1 / FREEBUFF_POOL_PROTECT_HOURS=0 restore the
+  // old fail-fast behaviour.
+  //
+  // holdHours keeps a live hour across a quit: a stock quit releases every local
+  // session (releaseForQuit), which ends the hour and leaves only a refund. The
+  // updater avoids that by setting this flag before it relaunches, so the session
+  // stays live server-side and the next boot re-adopts the thread's persisted
+  // instance id with the remaining minutes intact. FREEBUFF_POOL_HOLD_HOURS=0
+  // restores the release-on-quit behaviour.
+  const failoverOnBusy = (process.env.FREEBUFF_POOL_FAILOVER_ON_BUSY ?? "0") === "1";
+  const protectLiveHours = (process.env.FREEBUFF_POOL_PROTECT_HOURS ?? "1") !== "0";
+  const holdHours = (process.env.FREEBUFF_POOL_HOLD_HOURS ?? "1") !== "0";
+  note(
+    `policy: failoverOnBusy=${failoverOnBusy ? "on" : "off"} protectLiveHours=${
+      protectLiveHours ? "on" : "off"
+    } holdHours=${holdHours ? "on" : "off"}`,
   );
 
   const identityFile = (accountId) =>
@@ -223,20 +245,45 @@ try {
   };
 
   // ── fail over when an admission is refused for account reasons ─────────
+  // A refusal only moves the pool when another account actually helps:
+  // concurrency stays in the tab (takeover), and a live hour is never traded
+  // away for time on the next account.
   const originalEnsure = SessionManager.prototype.ensure;
   SessionManager.prototype.ensure = async function (...args) {
     try {
       return await originalEnsure.apply(this, args);
     } catch (error) {
-      const decision = core.failoverFor(error);
+      let hasLiveHour = false;
+      try {
+        hasLiveHour = core.hasLiveHour(sessions.snapshot());
+      } catch {}
+      const decision = core.failoverFor(error, {
+        allowBusy: failoverOnBusy,
+        protectLiveHour: protectLiveHours,
+        hasLiveHour,
+      });
       if (!decision) throw error;
+      const label = core.activeAccount()?.label ?? decision.accountId;
       note(
-        `${decision.status} on ${core.activeAccount()?.label ?? decision.accountId}: ${
-          String(error?.message ?? "").slice(0, 180)
-        }`,
+        `${decision.status} on ${label}: ${String(error?.message ?? "").slice(0, 180)}`,
       );
+      if (!decision.retry) {
+        if (decision.cooldown) core.markCooldown(decision.accountId, decision.cooldown);
+        else
+          core.noteError(decision.accountId, {
+            status: decision.status,
+            reason: decision.reason,
+          });
+        const why =
+          decision.action === "hold"
+            ? "it still holds a live hour"
+            : decision.action === "note"
+              ? "the tab resolves this one in place (Use it here)"
+              : "the account is parked";
+        note(`staying on ${label}: ${why}`);
+        throw error;
+      }
       core.markCooldown(decision.accountId, decision.cooldown ?? {});
-      if (!decision.retry) throw error;
       const next = core.chooseNext({ model: args[1] });
       if (!next) {
         note("no healthy account left for failover");
@@ -315,6 +362,7 @@ try {
               : null,
             authStorage: auth3.storageState?.() ?? null,
             statePath: desktopStatePath(),
+            policy: { failoverOnBusy, protectLiveHours, holdHours },
             pid: process.pid,
             events: events.slice(-40),
           });
@@ -422,6 +470,19 @@ try {
         note("seeded pool from the profile's current sign-in");
         await swapDeviceIdentity(created, null);
       } catch {}
+    }
+  }
+
+  // ── keep the hour across a quit ────────────────────────────────────────
+  // The updater's restart path, applied for good: sessions are not released on
+  // shutdown, so a relaunch picks the same live hour back up instead of ending
+  // it and starting a new one.
+  if (holdHours) {
+    try {
+      sessions.holdForRestart();
+      note("hours are held across quit: sessions stay live and the next boot re-adopts them");
+    } catch (error) {
+      note(`could not hold sessions across quit: ${error?.message ?? error}`);
     }
   }
 } catch (error) {

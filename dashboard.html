@@ -159,7 +159,11 @@
           <div class="mail">${escapeHtml(a.email || a.id)}</div>
           <div class="meters">${meters(a.quota)}</div>
           <div class="meta">${ago(a.lastUsedAt)} · switches ${a.switches}${
-            a.cooldown?.status ? " · last stop: " + escapeHtml(a.cooldown.status) : ""
+            a.cooldown?.status
+              ? " · last stop: " + escapeHtml(a.cooldown.status)
+              : a.lastError?.status
+                ? " · last refusal: " + escapeHtml(a.lastError.status)
+                : ""
           }</div>
           <div class="meta">egress ${escapeHtml(a.identity?.proxy || "direct")}${
             a.identity?.timezone ? " · tz " + escapeHtml(a.identity.timezone) : ""
@@ -181,7 +185,13 @@
       async function refresh() {
         try {
           state = await api("/api/status");
-          $("sub").textContent = `pid ${state.pid} · ${state.accounts.length} account(s) · ${state.statePath}`;
+          const policy = state.policy ?? {};
+          $("sub").textContent =
+            `pid ${state.pid} · ${state.accounts.length} account(s) · failover ${
+              policy.failoverOnBusy ? "on concurrency too" : "only when an account's allowance is out"
+            } · live hours ${policy.protectLiveHours === false ? "not protected" : "protected"} · hours ${
+              policy.holdHours === false ? "released on quit" : "held on quit"
+            } · ${state.statePath}`;
           $("cards").innerHTML = state.accounts.map(card).join("") || '<div class="sub">no accounts yet — add one</div>';
           $("events").textContent = (state.events || []).map((e) => e.at.slice(11, 19) + "  " + e.line).join("\n") || "no events";
         } catch (error) {

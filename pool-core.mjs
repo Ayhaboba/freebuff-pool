@@ -18,6 +18,9 @@ const SAVE_THROTTLE_MS = 5000;
 
 // Admission failures that are worth a different account.
 const QUOTA_STATUSES = new Set(["rate_limited", "spend_limited"]);
+// Concurrency refusals: this account's hour/tab is in use somewhere else.
+// The client answers them in place — the "Use it here" takeover moves the
+// hour into the current tab — so they only fail over when asked to.
 const BUSY_STATUSES = new Set([
   "session_limit_reached",
   "purchase_capacity",
@@ -286,6 +289,38 @@ export class PoolCore {
     return account;
   }
 
+  /**
+   * Remember a refusal without benching the account.
+   * Used when the refusal is real but another account should not answer for it.
+   */
+  noteError(id, { status = null, reason = null } = {}) {
+    const account = this.account(id);
+    if (!account) return null;
+    account.lastError = { status, reason, at: this.now() };
+    this.save({ force: true });
+    return account.lastError;
+  }
+
+  /**
+   * Does this `sessions.snapshot()` describe live paid time on this account?
+   *
+   * A live hour is the one thing a switch cannot give back: `applyAccount`
+   * releases the account's sessions before swapping identity, and the hour's
+   * clock keeps running while the pool is parked on another account. So a
+   * refusal is not failover material while one is up.
+   */
+  hasLiveHour(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    // snapshot() already filters expired sessions out of this map.
+    if (Object.keys(snapshot.activeSessionsByThread ?? {}).length > 0) return true;
+    const now = this.now();
+    return (snapshot.desktopPurchases ?? []).some((purchase) => {
+      if (!purchase?.holderInstanceId) return false; // bought but not held by a tab
+      const expiresAt = Date.parse(purchase.expiresAt ?? "");
+      return !Number.isFinite(expiresAt) || expiresAt > now;
+    });
+  }
+
   /** Keep a compact copy of what the server last said about this account. */
   recordSnapshot(id, snapshot, { force = false } = {}) {
     const account = this.account(id);
@@ -370,9 +405,22 @@ export class PoolCore {
 
   /**
    * Translate an admission error into a failover decision.
-   * Returns null when switching accounts cannot help.
+   *
+   * Returns null when switching accounts cannot help. Two refusals explicitly
+   * do not switch by default:
+   *
+   *   - concurrency refusals (`busy`): the tab resolves them itself — "Use it
+   *     here" takes the held hour over, without a charge. Switching answered
+   *     them by releasing that hour and spending the next account instead;
+   *   - quota refusals while this account still holds a live hour: switching
+   *     would release the hour to buy the same time on the next account.
+   *
+   * Both are recorded on the account (`action: "note"` / `"hold"`, `retry:
+   * false`, no cooldown — the account is still healthy) so the refusal is
+   * visible without benching it. `allowBusy` and `protectLiveHour: false`
+   * restore the fail-fast behaviour of the first release.
    */
-  failoverFor(error) {
+  failoverFor(error, { allowBusy = false, protectLiveHour = true, hasLiveHour = false } = {}) {
     const parsed = parseStatus(error);
     if (!parsed) return null;
     const { status, message, detail } = parsed;
@@ -389,7 +437,37 @@ export class PoolCore {
         retry: false,
       };
     }
+    if (BUSY_STATUSES.has(status)) {
+      if (!allowBusy) {
+        return {
+          accountId: active.id,
+          status,
+          reason: message,
+          action: "note",
+          cooldown: null,
+          retry: false,
+        };
+      }
+      return {
+        accountId: active.id,
+        status,
+        reason: message,
+        action: "cooldown",
+        cooldown: { status, reason: message, defaultMs: 90 * 1000 },
+        retry: true,
+      };
+    }
     if (QUOTA_STATUSES.has(status)) {
+      if (protectLiveHour && hasLiveHour) {
+        return {
+          accountId: active.id,
+          status,
+          reason: message,
+          action: "hold",
+          cooldown: null,
+          retry: false,
+        };
+      }
       return {
         accountId: active.id,
         status,
@@ -402,16 +480,6 @@ export class PoolCore {
           retryAfterMs: detail.retryAfterMs ?? null,
           defaultMs: 15 * 60 * 1000,
         },
-        retry: true,
-      };
-    }
-    if (BUSY_STATUSES.has(status)) {
-      return {
-        accountId: active.id,
-        status,
-        reason: message,
-        action: "cooldown",
-        cooldown: { status, reason: message, defaultMs: 90 * 1000 },
         retry: true,
       };
     }

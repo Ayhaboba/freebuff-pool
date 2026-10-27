@@ -1,10 +1,12 @@
 # freebuff-pool
 
 A multi-account pool for Freebuff Desktop. One window, several identities: when
-the active account hits a server-side limit (`rate_limited`, `spend_limited`,
-`session_limit_reached`, …) the orchestrator releases the session, switches to
-the next account with headroom, and keeps going. A token-gated dashboard on
-loopback shows every account, its quota and its cooldown state.
+the active account's allowance is out (`rate_limited`, `spend_limited`) the
+orchestrator releases the session, switches to the next account with headroom,
+and keeps going. Concurrency refusals ("this hour is in use in another tab") are
+left to the tab's own **Use it here** takeover, and a live hour is never released
+to buy time on another account. A token-gated dashboard on loopback shows every
+account, its quota and its cooldown state.
 
 ```
 Freebuff UI ──► orchestrator (patched)
@@ -14,7 +16,7 @@ Freebuff UI ──► orchestrator (patched)
                   │      └─ readAuth() = active    ▼
                   │                          pool-core.mjs   ◄── pool.json
                   ├─ SessionManager.ensure
-                  │      └─ on quota/busy error ──► failover → next account
+                  │      └─ quota refusal, no live hour ──► failover → next account
                   └─ loopback control plane :47821 (token-gated) ──► dashboard
 ```
 
@@ -27,6 +29,40 @@ Three pieces ship here:
 | `poolctl.mjs` | Shell CLI: status, switch, add, proxy, timezone, import. |
 | `clone.py` | Independent clones of the whole profile — each with its own state, projects and orchestrator lock. |
 | `dashboard.html` | The control-plane UI, served from loopback only. |
+
+## Failover policy
+
+A refusal only moves the pool when another account actually helps:
+
+| Refusal | What happens |
+|---|---|
+| `rate_limited`, `spend_limited` — the account's allowance is out | cooldown until the reset, switch to the next account with headroom, retry once |
+| `rate_limited`, `spend_limited` — while this account still holds a live hour | recorded on the account, error returned to the UI; the hour is not released |
+| `purchase_in_use`, `premium_slot_taken`, `purchase_capacity`, `session_limit_reached` (concurrency) | recorded, error returned to the UI so the tab's **Use it here** takeover runs — the hour moves here, on the same account, without a new charge |
+| `banned`, `unauthenticated`, `account_changed`, `country_blocked` | parked; never chosen again automatically |
+| `ip_capped`, `model_unavailable`, everything else | not failed over |
+
+`hasLiveHour()` reads the session snapshot: any active session, or a purchased
+hour a tab is holding. That is exactly what a switch releases, so no refusal can
+cost it. Manual switches (dashboard, `poolctl switch`, adding an account) still
+release the current hour on purpose — the UI then offers it back as "Resume your
+purchased hour".
+
+### Hours across a restart
+
+A stock quit releases every session, so a live hour ends there and the next
+launch buys a new one (the server settles the old one in credit). The pool holds
+them instead, using the same flag the updater sets before it relaunches
+(`sessions.holdForRestart()`): the session stays live server-side and the next
+boot re-adopts the thread's persisted instance id, remaining minutes intact.
+Closed tabs, logout and account switches still release on purpose.
+
+Escape hatches for the stock behaviour: `FREEBUFF_POOL_FAILOVER_ON_BUSY=1`
+(fail over on concurrency too), `FREEBUFF_POOL_PROTECT_HOURS=0` (let a quota
+refusal release a live hour) and `FREEBUFF_POOL_HOLD_HOURS=0` (release sessions
+on quit again). `run-pool.sh` / `run-pool.ps1` set all three defaults
+explicitly, the dashboard header prints the active policy, and `/api/status`
+exposes it as `policy`.
 
 ## Requirements
 
@@ -50,6 +86,12 @@ What it does:
 2. copies the tooling to `~/.freebuff-pool` (owner-only permissions),
 3. drops `poolctl` and `fbclone` shims into `~/.local/bin`,
 4. patches `orchestrator.js` — the original is kept as `orchestrator.js.pool-orig`.
+
+After the pool source changes, refresh an already patched bundle without
+reverting: `node patch.mjs <path to orchestrator.js>` swaps the injected runtime
+in place (and syntax-checks the result before writing). A running client keeps
+the runtime it booted with — restart it to pick up the new one; the boot log line
+`policy: …` confirms which version is live.
 
 An AppImage has to be extracted once: `./Freebuff-*.AppImage --appimage-extract`.
 
@@ -115,7 +157,8 @@ fbclone send NAME "text" [--dry]   # type into the clone's window
 ## Tests
 
 ```bash
-npm test        # node --test tests/pool-core.test.mjs
+npm test                            # node --test tests/pool-core.test.mjs
+python3 tests/test_clone_cmdline.py # clone.py argv handling
 ```
 
 ## Uninstall

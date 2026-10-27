@@ -4,7 +4,9 @@
 #   .\run-pool.ps1 -Isolated       # pool-only profile under ~/.freebuff-pool
 #
 # Env overrides: FREEBUFF_APP_DIR, FREEBUFF_POOL_HOME, FREEBUFF_POOL_PROFILE,
-#                FREEBUFF_POOL_FILE, FREEBUFF_POOL_PORT, FREEBUFF_POOL_SHARED
+#                FREEBUFF_POOL_FILE, FREEBUFF_POOL_PORT, FREEBUFF_POOL_SHARED,
+#                FREEBUFF_POOL_FAILOVER_ON_BUSY, FREEBUFF_POOL_PROTECT_HOURS,
+#                FREEBUFF_POOL_HOLD_HOURS
 param(
   [switch]$Isolated,
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -57,6 +59,13 @@ $env:FREEBUFF_POOL_FILE = if ($env:FREEBUFF_POOL_FILE) { $env:FREEBUFF_POOL_FILE
 $env:FREEBUFF_POOL_CORE = if ($env:FREEBUFF_POOL_CORE) { $env:FREEBUFF_POOL_CORE } else { Join-Path $PoolHome "pool-core.mjs" }
 $env:FREEBUFF_POOL_DASHBOARD = if ($env:FREEBUFF_POOL_DASHBOARD) { $env:FREEBUFF_POOL_DASHBOARD } else { Join-Path $PoolHome "dashboard.html" }
 $env:FREEBUFF_POOL_PORT = if ($env:FREEBUFF_POOL_PORT) { $env:FREEBUFF_POOL_PORT } else { "47821" }
+# Failover policy: a concurrency refusal goes to the tab's own "Use it here"
+# takeover, and a live hour is never released to buy time on the next account.
+$env:FREEBUFF_POOL_FAILOVER_ON_BUSY = if ($env:FREEBUFF_POOL_FAILOVER_ON_BUSY) { $env:FREEBUFF_POOL_FAILOVER_ON_BUSY } else { "0" }
+$env:FREEBUFF_POOL_PROTECT_HOURS = if ($env:FREEBUFF_POOL_PROTECT_HOURS) { $env:FREEBUFF_POOL_PROTECT_HOURS } else { "1" }
+# Keep a live hour across a quit: sessions are not released on shutdown and the
+# next boot re-adopts them. "0" restores release-on-quit.
+$env:FREEBUFF_POOL_HOLD_HOURS = if ($env:FREEBUFF_POOL_HOLD_HOURS) { $env:FREEBUFF_POOL_HOLD_HOURS } else { "1" }
 
 $ProfileDir = Split-Path -Parent $ProfilePath
 New-Item -ItemType Directory -Force -Path $ProfileDir, $PoolHome | Out-Null
